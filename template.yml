@@ -1,0 +1,234 @@
+AWSTemplateFormatVersion: 2010-09-09
+Transform: AWS::Serverless-2016-10-31
+
+Description: "Static website using S3 and CloudFront"
+
+Parameters:
+  DomainName:
+    Type: String
+    Description: "The domain name of website"
+  HostedZoneId:
+    Type: String
+    Description: "The Route53 hosted zone ID used for the domain"
+    Default: ""
+  AcmCertificateArn:
+    Type: String
+    Description: "The certificate arn for the domain name provided"
+  IndexDocument:
+    Type: String
+    Description: "The index document"
+    Default: "index.html"
+  ErrorDocument:
+    Type: String
+    Description: "The error document, ignored in SPA mode"
+    Default: "404.html"
+  RewriteMode:
+    Type: String
+    Description: "The request rewrite behaviour type"
+    Default: "STATIC"
+    AllowedValues:
+      - STATIC
+      - SPA
+  RewriteExcludeRegEx:
+    Type: String
+    Description: "Regular expression for authentication and path rewrite exclusion"
+    Default: "(^/assets/|robots\\.txt$|favicon\\.ico$|favicon\\.svg$)"
+  HttpAuthTokenEncoded:
+    Type: String
+    Description: "HTTP Basic Auth token: username and password encode in base64, leave empty to disable auth"
+    Default: ""
+    NoEcho: true
+  CloudFrontPriceClass:
+    Type: String
+    Description: "The price class for CloudFront distribution"
+    Default: "PriceClass_100"
+    AllowedValues:
+      - PriceClass_100
+      - PriceClass_200
+      - PriceClass_All
+  AllowedHeaders:
+    Type: CommaDelimitedList
+    Description: "CORS Allowed headers"
+    Default: "*"
+  AllowedMethods:
+    Type: CommaDelimitedList
+    Description: "CORS Allowed methods"
+    Default: "GET,HEAD"
+  AllowedOrigins:
+    Type: CommaDelimitedList
+    Description: "CORS Allowed origins"
+    Default: "*"
+  ExposedHeaders:
+    Type: CommaDelimitedList
+    Description: "CORS exposed headers"
+    Default: "ETag"
+
+Conditions:
+  IsHostedZoneIdProvided: !Not [!Equals [!Ref HostedZoneId, ""]]
+  IsStaticMode: !Equals [!Ref RewriteMode, "STATIC"]
+  IsSPAMode: !Equals [!Ref RewriteMode, "SPA"]
+
+Resources:
+  DnsRecord:
+    Type: AWS::Route53::RecordSet
+    Condition: IsHostedZoneIdProvided
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref DomainName
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt Distribution.DomainName
+        HostedZoneId: "Z2FDTNDATAQYW2" # CloudFront fixed hosted zone id
+  
+  Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref DomainName
+      AccessControl: Private
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders: !Ref AllowedHeaders
+            AllowedMethods: !Ref AllowedMethods
+            AllowedOrigins: !Ref AllowedOrigins
+            ExposedHeaders: !Ref ExposedHeaders
+            MaxAge: '3600'
+
+  BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref Bucket
+      PolicyDocument: 
+        Statement: 
+          - Effect: "Allow"
+            Action: "s3:GetObject"
+            Resource: !Sub "arn:aws:s3:::${Bucket}/*"
+            Principal: 
+              AWS: !Sub 'arn:aws:iam::cloudfront:user/CloudFront Origin Access Identity ${OriginAccessIdentity}'
+
+  OriginAccessIdentity:
+    Type: AWS::CloudFront::CloudFrontOriginAccessIdentity
+    Properties:
+      CloudFrontOriginAccessIdentityConfig:
+        Comment: !Ref AWS::StackName
+  
+  RequestRouterFunction:
+    Type: AWS::CloudFront::Function
+    Properties: 
+      Name: !Sub "${AWS::StackName}-req-router"
+      AutoPublish: true
+      FunctionCode: !Sub |
+        var rewriteMode = '${RewriteMode}';
+        var generatedAuth = '${HttpAuthTokenEncoded}';
+        var isAuthEnabled = generatedAuth.trim().length > 0;
+        var responseUnauthorized = {
+          statusCode: 401,
+          statusDescription: "Unauthorized",
+          headers: {
+            'www-authenticate': { value: 'Basic realm="Login Required", charset="UTF-8"' }
+          }
+        };
+
+        function handler(event) {
+          var request = event.request;
+          var uri = request.uri;
+          console.log('provided uri ' + uri);
+
+          if (uri.match('${RewriteExcludeRegEx}') !== null) {
+            console.log('detected excluded path, skip');
+            return request;
+          }
+
+          if (isAuthEnabled) {
+            var providedAuth = request.headers.authorization;
+            if (!providedAuth || !providedAuth.value) {
+              console.log('auth token not provided, return unauthorized response');
+              return responseUnauthorized;
+            }
+            if (providedAuth.value !== ('Basic ' + generatedAuth)) {
+              console.log('wrong auth token, provided ' + providedAuth.value  + ' but expected ' + generatedAuth + ', return unauthorized response');
+              return responseUnauthorized;
+            }
+          } else {
+            console.log('auth not enabled, skip');
+          }
+
+          if (rewriteMode === 'STATIC') {
+            if (!uri.endsWith('.html')) {
+              if (uri !== '/' && !uri.endsWith('/')) {
+                request.uri += '/';
+                console.log('trailing slash path rewritten to ' + request.uri);
+              }
+              request.uri += 'index.html';   
+              console.log('path rewritten for static to ' + request.uri);   
+            } else {
+              console.log('path not rewritten, used as it for static');   
+            }
+          } else if (rewriteMode === 'SPA') {
+            request.uri = '/index.html';
+            console.log('path rewritten for SPA to ' + request.uri);
+          }
+
+          return request;
+        }
+      FunctionConfig: 
+        Comment: "Check request authentication and rewrite requests"
+        Runtime: cloudfront-js-1.0
+
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: 'true'
+        Comment: !Ref AWS::StackName
+        DefaultRootObject: !Ref IndexDocument
+        HttpVersion: http2
+        CustomErrorResponses:
+          - ErrorCachingMinTTL: 86400 # cache errors for 24h
+            ErrorCode: 403 # object not found in bucket
+            ResponseCode: !If [IsStaticMode, 404, 200]
+            ResponsePagePath: !If [IsStaticMode, !Sub "/${ErrorDocument}", !Sub "/${IndexDocument}"]
+        Origins:
+          - DomainName: !Sub "${Bucket}.s3.${AWS::Region}.amazonaws.com"
+            Id: bucketOrigin
+            S3OriginConfig:
+              OriginAccessIdentity: !Sub origin-access-identity/cloudfront/${OriginAccessIdentity}
+        DefaultCacheBehavior:
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+          CachedMethods:
+            - GET
+            - HEAD
+          TargetOriginId: bucketOrigin
+          ViewerProtocolPolicy: redirect-to-https
+          OriginRequestPolicyId: 88a5eaf4-2fd4-4709-b370-b4c650ea3fcf # CORS-S3Origin - add S3 required header to origin request
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6 # CachingOptimized - optimize caching with object compression
+          ResponseHeadersPolicyId: eaab4381-ed33-4a86-88ca-d9558dc6cd63 # CORS-with-preflight-and-SecurityHeadersPolicy - add cors management and add security headers
+          FunctionAssociations:
+            - EventType: viewer-request
+              FunctionARN: !GetAtt RequestRouterFunction.FunctionMetadata.FunctionARN
+        PriceClass: !Ref CloudFrontPriceClass
+        Aliases:
+          - !Ref DomainName
+        ViewerCertificate:
+          AcmCertificateArn: !Ref AcmCertificateArn
+          SslSupportMethod: sni-only
+
+Outputs:
+  BucketName:
+    Description: "The S3 bucket name where HTML files need to be uploaded"
+    Value: !Ref Bucket
+  CloudFrontDistribution:
+    Description: "The CloudFront distribution in front of the S3 bucket"
+    Value: !Ref Distribution
+  WebsiteUrl:
+    Description: "The website URL"
+    Value: !Sub "https://${DomainName}/"
+
+
