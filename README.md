@@ -40,8 +40,9 @@ Resources:
       Parameters:
         DomainName: "my-domain.com"
         HostedZoneId: xxxxxxxxxxxxxxxxxx
-        AcmCertificateArn: "arn::" # need to be deploy in us-east-1
-        HttpAuthTokenEncoded: xxxxxxxxxxxxxxxxxxxx # base64 of username:password
+        AcmCertificateArn: "arn::" # need to be requested in us-east-1 region
+        HttpAuthUsername: demo
+        HttpAuthPassword: xxxxxxxxxxxxxxx
         RewriteExcludeRegEx: "(^/assets/|robots\\.txt$|favicon\\.ico$|favicon\\.svg$)"
 ```
 
@@ -60,7 +61,7 @@ This application need some parameters when you deploy it:
 
 - **DomainName**: The domain name of website.
 
-- **HostedZoneId**: The Route53 hosted zone ID used for the domain.
+- **HostedZoneId**: The Route53 hosted zone ID used for the domain, if empty not Route53 record will be created.
 
 - **AcmCertificateArn**: The certificate arn for the domain name provided.
 
@@ -68,32 +69,36 @@ This application need some parameters when you deploy it:
 
 - **ErrorDocument**: The error document, ignored in SPA mode.
 
-- **RewriteMode**: The request rewrite behaviour type.
+- **RewriteMode**: The request rewrite behaviour type (only `STATIC` or `SPA` value are allowed), default: `STATIC`.
 
-- **RewriteExcludeRegEx**: Regular expression for authentication and path rewrite exclusion.
+- **RewriteExcludeRegEx**: Regular expression for authentication and path rewrite exclusion, default: `(^/assets/|robots\\.txt$|favicon\\.ico$|favicon\\.svg$)`.
 
-- **CloudFrontPriceClass**: The price class for CloudFront distribution.
+- **CloudFrontPriceClass**: The price class for CloudFront distribution, default: `PriceClass_100`.
 
 ## Authentication parameters
 
-- **HttpAuthTokenEncoded**: HTTP Basic Auth token: username and password encode in base64, leave empty to disable auth.
+- **HttpAuth**: Enable or disable the HTTP basic auth, default: `DISABLED`.
+
+- **HttpAuthUsername**: HTTP Basic Auth username.
+
+- **HttpAuthPassword**: HTTP Basic Auth password.
 
 ## CORS parameters
 
-- **AllowedHeaders**: CORS Allowed headers.
+- **AllowedHeaders**: CORS Allowed headers, default: `*`.
 
-- **AllowedMethods**: CORS Allowed methods.
+- **AllowedMethods**: CORS Allowed methods, default: `GET,HEAD`.
 
-- **AllowedOrigins**: CORS Allowed origins.
+- **AllowedOrigins**: CORS Allowed origins, default: `*`.
 
-- **ExposedHeaders**: CORS exposed headers.
+- **ExposedHeaders**: CORS exposed headers, default: `ETag`.
 
 
 ## Outputs
 
 - **BucketName**: The S3 bucket name where HTML files need to be uploaded.
 
-- **CloudFrontDistribution**: The CloudFront distribution in front of the S3 bucket.
+- **CloudFrontDistributionId**: The CloudFront distribution ID in front of the S3 bucket.
 
 - **WebsiteUrl**: The website URL.
 
