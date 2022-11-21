@@ -10,6 +10,8 @@ Simple static website management for SPA, PWA, static or JAM stack applications.
 
 This application creates an S3 bucket that will contain the website content and a CloudFront distribution in front of it for caching purpose. CloudFront functions are used to provided the correct path rewrite and eventually checking a HTTP Basic auth, before request arrives to S3.
 
+Furthermore, the application add an EventBridge rule that forward bucket's creation/deletion events to a Lambda function that automatically create invalidations on Cloudfront distribution for related paths. 
+
 ![Infrastructure Schema](./doc/schema.png)
 
 ## Installation
