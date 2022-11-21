@@ -108,6 +108,9 @@ Resources:
             AllowedOrigins: !Ref AllowedOrigins
             ExposedHeaders: !Ref ExposedHeaders
             MaxAge: "3600"
+      NotificationConfiguration:
+        EventBridgeConfiguration:
+          EventBridgeEnabled: true
 
   BucketPolicy:
     Type: AWS::S3::BucketPolicy
@@ -132,7 +135,7 @@ Resources:
     Properties:
       Name: !Sub "${AWS::StackName}-req-router"
       AutoPublish: true
-      FunctionCode: !Sub 
+      FunctionCode: !Sub
         - |
           var rewriteMode = '${RewriteMode}';
           var isAuthEnabled = '${HttpAuth}' === 'ENABLED';
@@ -187,7 +190,7 @@ Resources:
 
             return request;
           }
-        - HttpAuthTokenEncoded: 
+        - HttpAuthTokenEncoded:
             Fn::Base64: !Sub "${HttpAuthUsername}:${HttpAuthPassword}"
           RewriteMode: !Ref RewriteMode
           HttpAuth: !Ref HttpAuth
@@ -195,6 +198,99 @@ Resources:
       FunctionConfig:
         Comment: "Check request authentication and rewrite requests"
         Runtime: cloudfront-js-1.0
+
+  InvalidationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: index.handler
+      Runtime: "nodejs14.x"
+      InlineCode: !Sub |
+        let AWS = require('aws-sdk')
+        let cloudfront = new AWS.CloudFront()
+
+        exports.handler = (event) => {
+
+        	console.log('S3 event', JSON.stringify(event))
+
+            let bucket = event['detail']['bucket']['name']
+            let cfDistributionId = process.env.CF_DISTRIBUTION_ID
+            let key = decodeURIComponent(event['detail']['object']['key'])
+
+            if (!key.startsWith('/')) key = '/' + key
+
+            console.log("Creating invalidation for " + key + " on Cloudfront distribution " + cfDistributionId)
+
+            let params = {
+              DistributionId: cfDistributionId,
+              InvalidationBatch: {
+                CallerReference: String(Date.now()),
+                Paths: {
+                  Quantity: 1,
+                  Items: [key]
+                }
+              }
+            };
+
+            try {
+                cloudfront.createInvalidation(params, function(err, data) {
+                    if (err) {
+                        console.log(err, err.stack)
+                    } else {
+                        console.log("Submitted invalidation. ID " + data['Invalidation']['Id'] + " Status " + data['Invalidation']['Status'])
+                    }
+                });
+            } catch (e) {
+                console.log("Error processing object " + key + " from bucket " + bucket, e)
+            }
+        }
+
+      AutoPublishAlias: live
+      MemorySize: 512
+      Timeout: 30
+      Environment:
+        Variables:
+          CF_DISTRIBUTION_ID: !GetAtt Distribution.Id
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - 'cloudfront:CreateInvalidation'
+              Resource: '*'
+
+  EventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: "EventRule"
+      State: "ENABLED"
+      EventPattern:
+        source:
+          - "aws.s3"
+        detail-type:
+          - "Object Created"
+          - "Object Deleted"
+        detail:
+          bucket:
+            name: [!Ref Bucket]
+      Targets:
+        -
+          Arn:
+            Fn::GetAtt:
+              - "InvalidationFunction"
+              - "Arn"
+          Id: "InvalidationFunctionTarget"
+
+  PermissionForEventsToInvokeLambda:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName:
+        Ref: "InvalidationFunction"
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+      SourceArn:
+        Fn::GetAtt:
+          - "EventRule"
+          - "Arn"
 
   Distribution:
     Type: AWS::CloudFront::Distribution
