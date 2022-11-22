@@ -73,11 +73,19 @@ Parameters:
     Type: CommaDelimitedList
     Description: "CORS exposed headers"
     Default: "ETag"
+  AutomaticInvalidation:
+    Type: String
+    Description: "Automatically invalidate CloudFront distribution when S3 bucket object change"
+    Default: "DISABLED"
+    AllowedValues:
+      - ENABLED
+      - DISABLED
 
 Conditions:
   IsHostedZoneIdProvided: !Not [!Equals [!Ref HostedZoneId, ""]]
   IsStaticMode: !Equals [!Ref RewriteMode, "STATIC"]
   IsSPAMode: !Equals [!Ref RewriteMode, "SPA"]
+  IsAutomaticInvalidationEnabled: !Equals [!Ref AutomaticInvalidation, "ENABLED"]
 
 Resources:
   DnsRecord:
@@ -110,7 +118,7 @@ Resources:
             MaxAge: "3600"
       NotificationConfiguration:
         EventBridgeConfiguration:
-          EventBridgeEnabled: true
+          EventBridgeEnabled: !If [IsAutomaticInvalidationEnabled, true, false]
 
   BucketPolicy:
     Type: AWS::S3::BucketPolicy
@@ -201,9 +209,10 @@ Resources:
 
   InvalidationFunction:
     Type: AWS::Serverless::Function
+    Condition: IsAutomaticInvalidationEnabled
     Properties:
       Handler: index.handler
-      Runtime: "nodejs14.x"
+      Runtime: "nodejs16.x"
       InlineCode: !Sub |
         let AWS = require('aws-sdk')
         let cloudfront = new AWS.CloudFront()
@@ -260,6 +269,7 @@ Resources:
 
   EventRule:
     Type: AWS::Events::Rule
+    Condition: IsAutomaticInvalidationEnabled
     Properties:
       Description: "EventRule"
       State: "ENABLED"
@@ -282,6 +292,7 @@ Resources:
 
   PermissionForEventsToInvokeLambda:
     Type: AWS::Lambda::Permission
+    Condition: IsAutomaticInvalidationEnabled
     Properties:
       FunctionName:
         Ref: "InvalidationFunction"
