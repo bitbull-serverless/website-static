@@ -211,14 +211,15 @@ Resources:
     Type: AWS::Serverless::Function
     Condition: IsAutomaticInvalidationEnabled
     Properties:
+      FunctionName: !Sub "${AWS::StackName}-invalidate"
       Handler: index.handler
-      Runtime: "nodejs16.x"
+      Runtime: "nodejs18.x"
       AutoPublishAlias: live
       MemorySize: 512
       Timeout: 30
       InlineCode: !Sub |
-        const AWS = require('aws-sdk')
-        const cloudfront = new AWS.CloudFront()
+        const { CloudFrontClient, CreateInvalidationCommand } = require('@aws-sdk/client-cloudfront')
+        const cloudFront = new CloudFrontClient()
 
         const rewriteMode = '${RewriteMode}';
         const distributionId = '${Distribution.Id}';
@@ -246,10 +247,10 @@ Resources:
           }
 
           invalidations = invalidations.map(key => !key.startsWith('/') ? '/' + key : key)
-          console.log("Creating invalidation for " + invalidations.join(', ') + " on Cloudfront distribution " + distributionId)
+          console.log('Creating invalidation for ' + invalidations.join(' ') + ' on Cloudfront distribution ' + distributionId)
 
           try {
-            const data = await cloudfront.createInvalidation({
+            const { Invalidation: invalidation } = await cloudFront.send(new CreateInvalidationCommand({
               DistributionId: distributionId,
               InvalidationBatch: {
                 CallerReference: String(Date.now()),
@@ -258,10 +259,10 @@ Resources:
                   Items: invalidations
                 }
               }
-            }).promise();
-            console.log("Submitted invalidation. ID " + data.Invalidation.Id)
+            }))
+            console.log('Submitted invalidation. ID ' + invalidation.Id)
           } catch (e) {
-            console.log("Error processing object " + key + " from bucket " + bucket, e)
+            console.log('Error processing object ' + key + ' from bucket ' + bucket, e)
           }
         }
       Policies:
