@@ -186,13 +186,13 @@ Resources:
                   request.uri += '/';
                   console.log('trailing slash path rewritten to ' + request.uri);
                 }
-                request.uri += 'index.html';
+                request.uri += '${IndexDocument}';
                 console.log('path rewritten for static to ' + request.uri);
               } else {
                 console.log('path not rewritten, used as it for static');
               }
             } else if (rewriteMode === 'SPA') {
-              request.uri = '/index.html';
+              request.uri = '/${IndexDocument}';
               console.log('path rewritten for SPA to ' + request.uri);
             }
 
@@ -213,52 +213,57 @@ Resources:
     Properties:
       Handler: index.handler
       Runtime: "nodejs16.x"
-      InlineCode: !Sub |
-        let AWS = require('aws-sdk')
-        let cloudfront = new AWS.CloudFront()
-
-        exports.handler = (event) => {
-
-        	console.log('S3 event', JSON.stringify(event))
-
-            let bucket = event['detail']['bucket']['name']
-            let cfDistributionId = process.env.CF_DISTRIBUTION_ID
-            let key = decodeURIComponent(event['detail']['object']['key'])
-
-            if (!key.startsWith('/')) key = '/' + key
-
-            console.log("Creating invalidation for " + key + " on Cloudfront distribution " + cfDistributionId)
-
-            let params = {
-              DistributionId: cfDistributionId,
-              InvalidationBatch: {
-                CallerReference: String(Date.now()),
-                Paths: {
-                  Quantity: 1,
-                  Items: [key]
-                }
-              }
-            };
-
-            try {
-                cloudfront.createInvalidation(params, function(err, data) {
-                    if (err) {
-                        console.log(err, err.stack)
-                    } else {
-                        console.log("Submitted invalidation. ID " + data['Invalidation']['Id'] + " Status " + data['Invalidation']['Status'])
-                    }
-                });
-            } catch (e) {
-                console.log("Error processing object " + key + " from bucket " + bucket, e)
-            }
-        }
-
       AutoPublishAlias: live
       MemorySize: 512
       Timeout: 30
-      Environment:
-        Variables:
-          CF_DISTRIBUTION_ID: !GetAtt Distribution.Id
+      InlineCode: !Sub |
+        const AWS = require('aws-sdk')
+        const cloudfront = new AWS.CloudFront()
+
+        const rewriteMode = '${RewriteMode}';
+        const distributionId = '${Distribution.Id}';
+        const indexDocument = '${IndexDocument}';
+
+        exports.handler = async (event) => {
+          console.log('S3 event', JSON.stringify(event))
+
+          let bucket = event.detail.bucket.name
+          let key = decodeURIComponent(event.detail.object.key)
+
+          let invalidations = []
+          if (rewriteMode === 'STATIC') {
+            invalidations.push(key)
+
+            if (key === indexDocument) {
+              invalidations.push('/')
+            } else if (key.includes(indexDocument)) {
+              invalidations.push(key.replace(indexDocument, ''))
+            }
+          } else if (rewriteMode === 'SPA') {
+            if (key === indexDocument) {
+              invalidations = ['/', '/*']
+            }
+          }
+
+          invalidations = invalidations.map(key => !key.startsWith('/') ? '/' + key : key)
+          console.log("Creating invalidation for " + invalidations.join(', ') + " on Cloudfront distribution " + distributionId)
+
+          try {
+            const data = await cloudfront.createInvalidation({
+              DistributionId: distributionId,
+              InvalidationBatch: {
+                CallerReference: String(Date.now()),
+                Paths: {
+                  Quantity: invalidations.length,
+                  Items: invalidations
+                }
+              }
+            }).promise();
+            console.log("Submitted invalidation. ID " + data.Invalidation.Id)
+          } catch (e) {
+            console.log("Error processing object " + key + " from bucket " + bucket, e)
+          }
+        }
       Policies:
         - Version: '2012-10-17'
           Statement:
@@ -266,42 +271,21 @@ Resources:
               Action:
                 - 'cloudfront:CreateInvalidation'
               Resource: '*'
-
-  EventRule:
-    Type: AWS::Events::Rule
-    Condition: IsAutomaticInvalidationEnabled
-    Properties:
-      Description: "EventRule"
-      State: "ENABLED"
-      EventPattern:
-        source:
-          - "aws.s3"
-        detail-type:
-          - "Object Created"
-          - "Object Deleted"
-        detail:
-          bucket:
-            name: [!Ref Bucket]
-      Targets:
-        -
-          Arn:
-            Fn::GetAtt:
-              - "InvalidationFunction"
-              - "Arn"
-          Id: "InvalidationFunctionTarget"
-
-  PermissionForEventsToInvokeLambda:
-    Type: AWS::Lambda::Permission
-    Condition: IsAutomaticInvalidationEnabled
-    Properties:
-      FunctionName:
-        Ref: "InvalidationFunction"
-      Action: "lambda:InvokeFunction"
-      Principal: "events.amazonaws.com"
-      SourceArn:
-        Fn::GetAtt:
-          - "EventRule"
-          - "Arn"
+      Events:
+        S3Event:
+          Type: EventBridgeRule
+          Properties:
+            EventBusName: default
+            Pattern:
+              source:
+                - "aws.s3"
+              detail-type:
+                - "Object Created"
+                - "Object Deleted"
+              detail:
+                bucket:
+                  name: 
+                    - !Ref Bucket
 
   Distribution:
     Type: AWS::CloudFront::Distribution
