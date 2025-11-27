@@ -4,16 +4,26 @@ Transform: AWS::Serverless-2016-10-31
 Description: "Static website using S3 and CloudFront"
 
 Parameters:
+  Project:
+    Type: String
+    Description: "The project name"
+    Default: "example"
+  Environment:
+    Type: String
+    Description: "The deployment environment"
+    Default: "dev"
   DomainName:
     Type: String
     Description: "The domain name of website"
+    Default: ""
   HostedZoneId:
     Type: String
-    Description: "The Route53 hosted zone ID used for the domain"
+    Description: "The Route53 hosted zone ID used for the domain, required only if DomainName is provided"
     Default: ""
   AcmCertificateArn:
     Type: String
-    Description: "The certificate arn for the domain name provided"
+    Description: "The certificate arn for the domain name provided, required only if DomainName is provided"
+    Default: ""
   IndexDocument:
     Type: String
     Description: "The index document"
@@ -84,8 +94,8 @@ Parameters:
 Conditions:
   IsHostedZoneIdProvided: !Not [!Equals [!Ref HostedZoneId, ""]]
   IsStaticMode: !Equals [!Ref RewriteMode, "STATIC"]
-  IsSPAMode: !Equals [!Ref RewriteMode, "SPA"]
   IsAutomaticInvalidationEnabled: !Equals [!Ref AutomaticInvalidation, "ENABLED"]
+  IsDomainProvided: !Not [!Equals [!Ref DomainName, ""]]
 
 Resources:
   DnsRecord:
@@ -102,8 +112,7 @@ Resources:
   Bucket:
     Type: AWS::S3::Bucket
     Properties:
-      BucketName: !Ref DomainName
-      AccessControl: Private
+      BucketName: !Sub "${Project}-${Environment}-site"
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
         BlockPublicPolicy: true
@@ -136,12 +145,12 @@ Resources:
     Type: AWS::CloudFront::CloudFrontOriginAccessIdentity
     Properties:
       CloudFrontOriginAccessIdentityConfig:
-        Comment: !Ref AWS::StackName
+        Comment: !Sub "${Project}-${Environment}"
 
   RequestRouterFunction:
     Type: AWS::CloudFront::Function
     Properties:
-      Name: !Sub "${AWS::StackName}-req-router"
+      Name: !Sub "${Project}-${Environment}-req-router"
       AutoPublish: true
       FunctionCode: !Sub
         - |
@@ -186,13 +195,13 @@ Resources:
                   request.uri += '/';
                   console.log('trailing slash path rewritten to ' + request.uri);
                 }
-                request.uri += 'index.html';
+                request.uri += '${IndexDocument}';
                 console.log('path rewritten for static to ' + request.uri);
               } else {
                 console.log('path not rewritten, used as it for static');
               }
             } else if (rewriteMode === 'SPA') {
-              request.uri = '/index.html';
+              request.uri = '/${IndexDocument}';
               console.log('path rewritten for SPA to ' + request.uri);
             }
 
@@ -211,26 +220,28 @@ Resources:
     Type: AWS::Serverless::Function
     Condition: IsAutomaticInvalidationEnabled
     Properties:
+      FunctionName: !Sub "${Project}-${Environment}-cf-invalidate"
       Handler: index.handler
-      Runtime: "nodejs16.x"
+      Runtime: "nodejs22.x"
+      MemorySize: 256
+      Timeout: 30
       InlineCode: !Sub |
-        let AWS = require('aws-sdk')
-        let cloudfront = new AWS.CloudFront()
+        const { CloudFrontClient, CreateInvalidationCommand } = require("@aws-sdk/client-cloudfront");
+        const cloudfront = new CloudFrontClient();
 
-        exports.handler = (event) => {
+        const CF_DISTRIBUTION_ID = process.env.CF_DISTRIBUTION_ID;
 
-        	console.log('S3 event', JSON.stringify(event))
+        exports.handler = async (event) => {
+        	  console.log('S3 event', JSON.stringify(event))
 
-            let bucket = event['detail']['bucket']['name']
-            let cfDistributionId = process.env.CF_DISTRIBUTION_ID
+            const bucket = event['detail']['bucket']['name']
             let key = decodeURIComponent(event['detail']['object']['key'])
-
             if (!key.startsWith('/')) key = '/' + key
 
-            console.log("Creating invalidation for " + key + " on Cloudfront distribution " + cfDistributionId)
+            console.log("Creating invalidation for " + key + " on Cloudfront distribution " + CF_DISTRIBUTION_ID)
 
-            let params = {
-              DistributionId: cfDistributionId,
+            const params = {
+              DistributionId: CF_DISTRIBUTION_ID,
               InvalidationBatch: {
                 CallerReference: String(Date.now()),
                 Paths: {
@@ -241,21 +252,12 @@ Resources:
             };
 
             try {
-                cloudfront.createInvalidation(params, function(err, data) {
-                    if (err) {
-                        console.log(err, err.stack)
-                    } else {
-                        console.log("Submitted invalidation. ID " + data['Invalidation']['Id'] + " Status " + data['Invalidation']['Status'])
-                    }
-                });
+              const invalidation = await cloudfront.send(new CreateInvalidationCommand(params));
+              console.log("Submitted invalidation. ID " + invalidation.Invalidation.Id + " Status " + invalidation.Invalidation.Status);
             } catch (e) {
                 console.log("Error processing object " + key + " from bucket " + bucket, e)
             }
         }
-
-      AutoPublishAlias: live
-      MemorySize: 512
-      Timeout: 30
       Environment:
         Variables:
           CF_DISTRIBUTION_ID: !GetAtt Distribution.Id
@@ -266,49 +268,26 @@ Resources:
               Action:
                 - 'cloudfront:CreateInvalidation'
               Resource: '*'
-
-  EventRule:
-    Type: AWS::Events::Rule
-    Condition: IsAutomaticInvalidationEnabled
-    Properties:
-      Description: "EventRule"
-      State: "ENABLED"
-      EventPattern:
-        source:
-          - "aws.s3"
-        detail-type:
-          - "Object Created"
-          - "Object Deleted"
-        detail:
-          bucket:
-            name: [!Ref Bucket]
-      Targets:
-        -
-          Arn:
-            Fn::GetAtt:
-              - "InvalidationFunction"
-              - "Arn"
-          Id: "InvalidationFunctionTarget"
-
-  PermissionForEventsToInvokeLambda:
-    Type: AWS::Lambda::Permission
-    Condition: IsAutomaticInvalidationEnabled
-    Properties:
-      FunctionName:
-        Ref: "InvalidationFunction"
-      Action: "lambda:InvokeFunction"
-      Principal: "events.amazonaws.com"
-      SourceArn:
-        Fn::GetAtt:
-          - "EventRule"
-          - "Arn"
+      Events:
+        S3Event:
+          Type: EventBridgeRule
+          Properties:
+            Pattern:
+              source:
+                - "aws.s3"
+              detail-type:
+                - "Object Created"
+                - "Object Deleted"
+              detail:
+                bucket:
+                  name: [!Ref Bucket]
 
   Distribution:
     Type: AWS::CloudFront::Distribution
     Properties:
       DistributionConfig:
         Enabled: 'true'
-        Comment: !Ref AWS::StackName
+        Comment: !Sub "${Project}-${Environment}"
         DefaultRootObject: !Ref IndexDocument
         HttpVersion: http2
         CustomErrorResponses:
@@ -339,10 +318,11 @@ Resources:
               FunctionARN: !GetAtt RequestRouterFunction.FunctionMetadata.FunctionARN
         PriceClass: !Ref CloudFrontPriceClass
         Aliases:
-          - !Ref DomainName
+          - !If [IsDomainProvided, !Ref DomainName, !Ref "AWS::NoValue"]
         ViewerCertificate:
-          AcmCertificateArn: !Ref AcmCertificateArn
-          SslSupportMethod: sni-only
+          CloudFrontDefaultCertificate: !If [IsDomainProvided, !Ref "AWS::NoValue", true]
+          AcmCertificateArn: !If [IsDomainProvided, !Ref AcmCertificateArn, !Ref "AWS::NoValue"]
+          SslSupportMethod: !If [IsDomainProvided, "sni-only", !Ref "AWS::NoValue"]
 
 Outputs:
   BucketName:
@@ -353,4 +333,4 @@ Outputs:
     Value: !Ref Distribution
   WebsiteUrl:
     Description: "The website URL"
-    Value: !Sub "https://${DomainName}/"
+    Value: !If [IsDomainProvided, !Sub "https://${DomainName}/", !Sub "https://${Distribution.DomainName}/"]

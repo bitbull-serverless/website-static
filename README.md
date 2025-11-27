@@ -40,9 +40,28 @@ Resources:
     Properties:
       TemplateURL: # pick a templates links from section below, based on your region
       Parameters:
+        Project: "example"
+        Environment: "dev"
         DomainName: "my-domain.com"
         HostedZoneId: xxxxxxxxxxxxxxxxxx
         AcmCertificateArn: "arn::" # need to be requested in us-east-1 region
+        HttpAuthUsername: demo
+        HttpAuthPassword: xxxxxxxxxxxxxxx
+        RewriteExcludeRegEx: "(^/assets/|robots\\.txt$|favicon\\.ico$|favicon\\.svg$)"
+```
+or without custom domain:
+```yaml
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+
+Resources:
+  WebsiteStatic:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: # pick a templates links from section below, based on your region
+      Parameters:
+        Project: "example"
+        Environment: "dev"
         HttpAuthUsername: demo
         HttpAuthPassword: xxxxxxxxxxxxxxx
         RewriteExcludeRegEx: "(^/assets/|robots\\.txt$|favicon\\.ico$|favicon\\.svg$)"
@@ -61,11 +80,15 @@ Resources:
 
 This application need some parameters when you deploy it:
 
+- **Project**: The project name.
+
+- **Environment**: The deployment environment.
+
 - **DomainName**: The domain name of website.
 
-- **HostedZoneId**: The Route53 hosted zone ID used for the domain, if empty not Route53 record will be created.
+- **HostedZoneId**: The Route53 hosted zone ID used for the domain (only if DomainName is provided), if empty not Route53 record will be created.
 
-- **AcmCertificateArn**: The certificate arn for the domain name provided.
+- **AcmCertificateArn**: The certificate arn for the domain name provided, required only if DomainName is provided.
 
 - **IndexDocument**: The index document.
 
@@ -94,7 +117,6 @@ This application need some parameters when you deploy it:
 - **AllowedOrigins**: CORS Allowed origins, default: `*`.
 
 - **ExposedHeaders**: CORS exposed headers, default: `ETag`.
-
 
 ## Outputs
 
