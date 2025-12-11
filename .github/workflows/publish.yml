@@ -73,12 +73,12 @@ jobs:
           python-version: "3.8" # required for SAM CLI
 
       - uses: aws-actions/setup-sam@v1
-      
-      - uses: aws-actions/configure-aws-credentials@v1
+
+      - uses: aws-actions/configure-aws-credentials@v5.1.0
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          audience: sts.amazonaws.com
           aws-region: ${{ matrix.config.region }}
+          role-to-assume: ${{ secrets.OIDC_ROLE_ARN }}
 
       - uses: actions/download-artifact@master
         with:
