@@ -70,6 +70,7 @@ jobs:
       matrix: 
         config: ${{fromJson(needs.load_config.outputs.matrix)}}
     needs: [build, load_config, create_release]
+    permissions: write-all
     steps:
       - uses: actions/checkout@v2
 
