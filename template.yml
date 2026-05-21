@@ -42,7 +42,7 @@ Parameters:
   RewriteExcludeRegEx:
     Type: String
     Description: "Regular expression for authentication and path rewrite exclusion"
-    Default: "(^/assets/|robots\\.txt$|favicon\\.ico$|favicon\\.svg$)"
+    Default: "(/assets/|robots\\.txt$|favicon\\.ico$|favicon\\.svg$)"
   HttpAuth:
     Type: String
     Description: "Enable or disable the HTTP basic auth"
@@ -90,11 +90,21 @@ Parameters:
     AllowedValues:
       - ENABLED
       - DISABLED
+  CloudFrontCaching:
+    Type: String
+    Description: "Enable or disable CloudFront caching"
+    Default: "ENABLED"
+    AllowedValues:
+      - ENABLED
+      - DISABLED
 
 Conditions:
   IsHostedZoneIdProvided: !Not [!Equals [!Ref HostedZoneId, ""]]
   IsStaticMode: !Equals [!Ref RewriteMode, "STATIC"]
   IsAutomaticInvalidationEnabled: !Equals [!Ref AutomaticInvalidation, "ENABLED"]
+  IsCachingEnabled: !Equals [!Ref CloudFrontCaching, "ENABLED"]
+  IsHttpAuthEnabled: !Equals [!Ref HttpAuth, "ENABLED"]
+  NeedsEventBridge: !Or [!Condition IsAutomaticInvalidationEnabled, !Condition IsHttpAuthEnabled]
   IsDomainProvided: !Not [!Equals [!Ref DomainName, ""]]
 
 Resources:
@@ -127,7 +137,7 @@ Resources:
             MaxAge: "3600"
       NotificationConfiguration:
         EventBridgeConfiguration:
-          EventBridgeEnabled: !If [IsAutomaticInvalidationEnabled, true, false]
+          EventBridgeEnabled: !If [NeedsEventBridge, true, false]
 
   BucketPolicy:
     Type: AWS::S3::BucketPolicy
@@ -147,6 +157,12 @@ Resources:
       CloudFrontOriginAccessIdentityConfig:
         Comment: !Sub "${Project}-${Environment}"
 
+  CredentialsKeyValueStore:
+    Type: AWS::CloudFront::KeyValueStore
+    Properties:
+      Name: !Sub "${Project}-${Environment}-credentials"
+      Comment: !Sub "Per-subdomain HTTP Basic Auth credentials for ${Project}-${Environment}"
+
   RequestRouterFunction:
     Type: AWS::CloudFront::Function
     Properties:
@@ -154,9 +170,11 @@ Resources:
       AutoPublish: true
       FunctionCode: !Sub
         - |
+          import cf from 'cloudfront';
+          var kvsHandle = cf.kvs('${CredentialsKeyValueStoreId}');
           var rewriteMode = '${RewriteMode}';
           var isAuthEnabled = '${HttpAuth}' === 'ENABLED';
-          var authToken = '${HttpAuthTokenEncoded}';
+          var globalAuthToken = '${HttpAuthTokenEncoded}';
           var responseUnauthorized = {
             statusCode: 401,
             statusDescription: "Unauthorized",
@@ -165,24 +183,58 @@ Resources:
             }
           };
 
-          function handler(event) {
+          async function handler(event) {
             var request = event.request;
+            var host = request.headers.host ? request.headers.host.value : '';
+            var domainName = '${DomainName}';
+            var originalUri = request.uri;
+            var subdomainPrefix = '';
+            var subdomain = null;
+
+            if (domainName.indexOf('*.') === 0) {
+              var baseDomain = domainName.substring(2);
+              if (host.length > baseDomain.length && host.indexOf('.' + baseDomain) === (host.length - baseDomain.length - 1)) {
+                var candidate = host.substring(0, host.length - baseDomain.length - 1);
+                if (candidate !== 'www') {
+                  subdomain = candidate;
+                  subdomainPrefix = '/' + subdomain;
+                  if (request.uri !== subdomainPrefix && request.uri.indexOf(subdomainPrefix + '/') !== 0) {
+                    request.uri = subdomainPrefix + request.uri;
+                  }
+                }
+              }
+            }
+
             var uri = request.uri;
-            console.log('provided uri ' + uri);
 
             if (uri.match('${RewriteExcludeRegEx}') !== null) {
               console.log('detected excluded path, skip');
               return request;
             }
 
-            if (isAuthEnabled) {
+            var effectiveAuthEnabled = isAuthEnabled;
+            var effectiveAuthToken = globalAuthToken;
+
+            if (subdomain) {
+              try {
+                var kvsValue = await kvsHandle.get(subdomain);
+                if (kvsValue) {
+                  effectiveAuthEnabled = true;
+                  effectiveAuthToken = kvsValue;
+                }
+              } catch (e) {
+                console.log('no KVS entry for ' + subdomain + ', using global auth settings');
+              }
+            }
+
+            if (effectiveAuthEnabled) {
               var providedAuth = request.headers.authorization;
               if (!providedAuth || !providedAuth.value) {
                 console.log('auth token not provided, return unauthorized response');
                 return responseUnauthorized;
               }
-              if (providedAuth.value !== ('Basic ' + authToken)) {
-                console.log('wrong auth token, provided ' + providedAuth.value  + ' but expected ' + authToken + ', return unauthorized response');
+              if (providedAuth.value !== ('Basic ' + effectiveAuthToken)) {
+                console.log('wrong auth token, return unauthorized response');
                 return responseUnauthorized;
               }
             } else {
@@ -191,9 +243,15 @@ Resources:
 
             if (rewriteMode === 'STATIC') {
               if (!uri.endsWith('.html')) {
-                if (uri !== '/' && !uri.endsWith('/')) {
-                  request.uri += '/';
-                  console.log('trailing slash path rewritten to ' + request.uri);
+                if (originalUri !== '/' && !originalUri.endsWith('/')) {
+                  console.log('redirecting to trailing slash: ' + originalUri + '/');
+                  return {
+                    statusCode: 301,
+                    statusDescription: 'Moved Permanently',
+                    headers: {
+                      'location': { value: originalUri + '/' }
+                    }
+                  };
                 }
                 request.uri += '${IndexDocument}';
                 console.log('path rewritten for static to ' + request.uri);
@@ -212,9 +270,13 @@ Resources:
           RewriteMode: !Ref RewriteMode
           HttpAuth: !Ref HttpAuth
           RewriteExcludeRegEx: !Ref RewriteExcludeRegEx
+          DomainName: !Ref DomainName
+          CredentialsKeyValueStoreId: !GetAtt CredentialsKeyValueStore.Id
       FunctionConfig:
         Comment: "Check request authentication and rewrite requests"
-        Runtime: cloudfront-js-1.0
+        Runtime: cloudfront-js-2.0
+        KeyValueStoreAssociations:
+          - KeyValueStoreARN: !GetAtt CredentialsKeyValueStore.Arn
 
   InvalidationFunction:
     Type: AWS::Serverless::Function
@@ -282,6 +344,63 @@ Resources:
                 bucket:
                   name: [!Ref Bucket]
 
+  CredentialsSyncFunction:
+    Type: AWS::Serverless::Function
+    Condition: IsHttpAuthEnabled
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: false
+        Target: "es2022"
+        Format: esm
+        OutExtension:
+          - .js=.mjs
+        EntryPoints:
+          - index.mjs
+        External:
+          - "@aws-sdk/client-s3"
+        Banner:
+          - js=import { createRequire } from 'module'; const require = createRequire(import.meta.url);
+    Properties:
+      FunctionName: !Sub "${Project}-${Environment}-credentials-sync"
+      CodeUri: functions/credentials-sync/
+      Handler: index.handler
+      Runtime: "nodejs22.x"
+      MemorySize: 256
+      Timeout: 30
+      Environment:
+        Variables:
+          KVS_ARN: !GetAtt CredentialsKeyValueStore.Arn
+          BUCKET_NAME: !Ref Bucket
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - 's3:GetObject'
+              Resource: !Sub "arn:aws:s3:::${Bucket}/credentials.txt"
+            - Effect: Allow
+              Action:
+                - 'cloudfront-keyvaluestore:DescribeKeyValueStore'
+                - 'cloudfront-keyvaluestore:ListKeys'
+                - 'cloudfront-keyvaluestore:PutKey'
+                - 'cloudfront-keyvaluestore:DeleteKey'
+              Resource: !GetAtt CredentialsKeyValueStore.Arn
+      Events:
+        CredentialsFileEvent:
+          Type: EventBridgeRule
+          Properties:
+            Pattern:
+              source:
+                - "aws.s3"
+              detail-type:
+                - "Object Created"
+              detail:
+                bucket:
+                  name: [!Ref Bucket]
+                object:
+                  key: ["credentials.txt"]
+
   Distribution:
     Type: AWS::CloudFront::Distribution
     Properties:
@@ -311,7 +430,7 @@ Resources:
           TargetOriginId: bucketOrigin
           ViewerProtocolPolicy: redirect-to-https
           OriginRequestPolicyId: 88a5eaf4-2fd4-4709-b370-b4c650ea3fcf # CORS-S3Origin - add S3 required header to origin request
-          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6 # CachingOptimized - optimize caching with object compression
+          CachePolicyId: !If [IsCachingEnabled, 658327ea-f89d-4fab-a63d-7e88639e58f6, 4135ea2d-6df8-44a3-9df3-4b5a84be39ad] # CachingOptimized / CachingDisabled
           ResponseHeadersPolicyId: eaab4381-ed33-4a86-88ca-d9558dc6cd63 # CORS-with-preflight-and-SecurityHeadersPolicy - add cors management and add security headers
           FunctionAssociations:
             - EventType: viewer-request

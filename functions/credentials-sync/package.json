@@ -1,0 +1,12 @@
+{
+  "name": "credentials-sync",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "@aws-sdk/client-cloudfront-keyvaluestore": "^3.0.0",
+    "@aws-sdk/signature-v4a": "^3.0.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.0"
+  }
+}
